@@ -1,0 +1,112 @@
+# MinIO Linux部署工具配置文件示例
+# 详细配置说明请参考官方文档
+
+# 部署模式: standalone(单机) 或 cluster(集群)
+deployment_mode: "standalone"
+
+# 日志配置
+logging:
+  level: "DEBUG"                       # 日志级别，可选值：DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: "logs/minio-deploy.log"    # 日志文件路径，默认为logs/minio-deploy.log
+  console_output: true                 # 是否输出到控制台，默认为true
+
+# MinIO版本配置
+minio:
+  version: "RELEASE.2024-01-18T22-51-48Z"       # MinIO版本
+  download_url: "https://dl.min.io/server/minio/release/linux-amd64/minio"  # MinIO下载地址
+  local_package_dir: "packages"                 # 本地MinIO安装包目录
+  mc_version: "RELEASE.2024-01-18T22-51-48Z"    # MinIO客户端(mc)版本
+  mc_download_url: "https://dl.min.io/client/mc/release/linux-amd64/mc"     # MinIO客户端(mc)下载地址
+  mc_local_package_dir: "packages"              # 本地MinIO客户端(mc)安装包目录
+
+# 认证信息
+credentials:
+  root_user: "minioadmin"         # MinIO root用户
+  root_password: "minioadmin123"  # MinIO root密码
+
+# 单机模式配置
+standalone:
+  host: "localhost"             # 主机地址，localhost表示本机，其他表示远程主机
+  data_dir: "/data/minio"       # 数据目录
+  domain: ""                    # 域名（可选）
+  enable_ssl: false             # 是否启用SSL，默认为false
+  # SSH配置（仅当host不是localhost时需要）
+  ssh_user: "root"              # SSH用户名，默认为root
+  ssh_key: "~/.ssh/id_rsa.pub"  # SSH公钥文件路径
+  ssh_password: ""              # SSH密码（优先使用密码方式）
+  ssh_port: 22                  # SSH端口，默认为22
+
+  # 磁盘配置（必选）
+  disk:
+    enabled: false              # 是否启用磁盘管理，默认为false
+    device: "/dev/sdb1"         # 磁盘设备路径
+    mount_point: "/data/minio"  # 挂载点
+    filesystem: "ext4"          # 文件系统类型，默认为ext4
+    format_disk: false          # 是否格式化磁盘，默认为false
+
+# 集群模式配置
+cluster:
+  nodes:
+    - host: "node1.example.com"
+      ip: "192.168.3.91"
+      data_dir: "/data/minio"
+      ssh_user: "wls"
+      ssh_key: "~/.ssh/id_rsa.pub"
+      ssh_port: 22
+      ssh_password: "sparknet@123"          # SSH密码（优先使用密码方式）
+      labels: "disk=ssd,region=north"
+      # 磁盘配置（必选）
+      disk:
+        enabled: false          # 是否启用磁盘管理，默认为false
+        device: "/dev/sdb1"     # 磁盘设备路径
+        mount_point: "/data/minio"  # 挂载点
+        filesystem: "ext4"      # 文件系统类型，默认为ext4
+        format_disk: false      # 是否格式化磁盘，默认为false
+    - host: "node2.example.com"
+      ip: "192.168.3.92"
+      data_dir: "/data/minio"
+      ssh_user: "wls"
+      ssh_key: "~/.ssh/id_rsa.pub"
+      ssh_port: 22
+      ssh_password: "sparknet@123"          # SSH密码（优先使用密码方式）
+      labels: "disk=ssd,region=north"
+      # 磁盘配置（必选）
+      disk:
+        enabled: false          # 是否启用磁盘管理，默认为false
+        device: "/dev/sdb1"     # 磁盘设备路径
+        mount_point: "/data/minio"  # 挂载点
+        filesystem: "ext4"      # 文件系统类型，默认为ext4
+        format_disk: false      # 是否格式化磁盘，默认为false
+    # 更多节点...
+
+  server_port: 9000           # 服务端口
+  console_port: 9001          # 控制台端口
+  region: "us-east-1"         # 集群区域
+
+  # 纠删码配置
+  erasure_coding:
+    standard: "EC:4"          # 纠删码标准，默认为EC:4
+
+  # 存储桶配置
+  buckets:
+    - name: "public-bucket"
+      policy: "public"        # 访问策略：public, private
+      quota: 0                # 存储空间配额（GB），0表示无限制
+    - name: "private-bucket"
+      policy: "private"
+      quota: 100              # 100GB配额
+
+# 高级配置
+advanced:
+  performance:
+    ulimit_nofile: 65536     # 文件描述符限制
+    ulimit_nproc: 16384      # 进程数限制
+
+  monitoring:
+    prometheus: false        # 是否启用Prometheus监控
+    prometheus_port: 9002    # Prometheus监控端口
+    healthcheck: true        # 是否启用健康检查
+
+  security:
+    enable_audit_log: false  # 是否启用审计日志
+    tls_skip_verify: false   # 是否跳过TLS验证
