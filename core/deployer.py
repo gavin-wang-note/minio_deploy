@@ -340,19 +340,31 @@ class Deployer:
                     
                     self.logger.info(f"通过SSH在远程主机 {host} 上安装MinIO")
                     
-                    # 安装MinIO二进制文件
-                    cmd = f"curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio"
-                    result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                    if result[0] != 0:
-                        self.logger.error(f"在远程主机 {host} 上安装MinIO失败：{result[2]}")
-                        exit(1)
+                    # 检查MinIO是否已安装
+                    check_cmd = "which minio || command -v minio || [ -f /usr/local/bin/minio ]"
+                    result = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    if result[0] == 0:
+                        self.logger.info(f"MinIO已在远程主机 {host} 上安装，跳过安装步骤")
+                    else:
+                        # 安装MinIO二进制文件
+                        cmd = f"curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio"
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        if result[0] != 0:
+                            self.logger.error(f"在远程主机 {host} 上安装MinIO失败：{result[2]}")
+                            exit(1)
                     
-                    # 安装mc客户端
-                    cmd = f"curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc"
-                    result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                    if result[0] != 0:
-                        self.logger.warning(f"在远程主机 {host} 上安装mc客户端失败：{result[2]}")
-                        # 安装mc失败不影响MinIO主功能，继续执行
+                    # 检查mc是否已安装
+                    check_cmd = "which mc || command -v mc || [ -f /usr/local/bin/mc ]"
+                    result = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    if result[0] == 0:
+                        self.logger.info(f"mc已在远程主机 {host} 上安装，跳过安装步骤")
+                    else:
+                        # 安装mc客户端
+                        cmd = f"curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc"
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        if result[0] != 0:
+                            self.logger.warning(f"在远程主机 {host} 上安装mc客户端失败：{result[2]}")
+                            # 安装mc失败不影响MinIO主功能，继续执行
         
         elif deployment_mode == "cluster":
             cluster_config = self.config.get("cluster", {})
@@ -368,18 +380,30 @@ class Deployer:
                     self.logger.info(f"[DRY RUN] 准备在节点 {ssh_params['host']} 上安装MinIO")
                     return True
                 else:
-                    # 在远程节点上安装MinIO
-                    # 这里简化处理，实际可能需要更复杂的逻辑，如上传二进制文件等
-                    # 暂时假设远程节点可以直接访问互联网下载MinIO
-                    cmd = f"curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio"  # noqa
-                    result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
-                    if result[0] != 0:
-                        self.logger.error(f"在节点 {ssh_params['host']} 上安装MinIO失败：{result[2]}")
-                        return False
+                    # 检查MinIO是否已安装
+                    check_cmd = "which minio || command -v minio || [ -f /usr/local/bin/minio ]"
+                    result = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
+                    if result[0] == 0:
+                        self.logger.info(f"MinIO已在节点 {ssh_params['host']} 上安装，跳过安装步骤")
+                    else:
+                        # 在远程节点上安装MinIO
+                        # 这里简化处理，实际可能需要更复杂的逻辑，如上传二进制文件等
+                        # 暂时假设远程节点可以直接访问互联网下载MinIO
+                        cmd = f"curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio"  # noqa
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
+                        if result[0] != 0:
+                            self.logger.error(f"在节点 {ssh_params['host']} 上安装MinIO失败：{result[2]}")
+                            return False
                     
-                    # 安装mc
-                    cmd = f"curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc"  # noqa
-                    self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
+                    # 检查mc是否已安装
+                    check_cmd = "which mc || command -v mc || [ -f /usr/local/bin/mc ]"
+                    result = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
+                    if result[0] != 0:
+                        # 安装mc
+                        cmd = f"curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc"  # noqa
+                        self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"])
+                    else:
+                        self.logger.info(f"mc已在节点 {ssh_params['host']} 上安装，跳过安装步骤")
                     
                     return True
             
@@ -412,8 +436,13 @@ class Deployer:
             if host in ["localhost", "127.0.0.1", "127.0.1.1"]:
                 # 本地主机，直接检查
                 if self.service_manager.check_service_exists():
-                    self.logger.error("检测到本地已存在MinIO服务！为避免覆盖现有环境，操作已终止。")
-                    exit(1)
+                    # 检查服务是否正在运行
+                    status, _ = self.service_manager.check_service_status()
+                    if status:
+                        self.logger.error("检测到本地已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
+                        exit(1)
+                    else:
+                        self.logger.warning("检测到本地存在MinIO服务文件，但服务未运行，可以继续部署。")
             else:
                 # 远程主机，通过SSH检查
                 ssh_params = self.get_ssh_params()
@@ -423,8 +452,15 @@ class Deployer:
                 exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
                 
                 if exit_code == 0:
-                    self.logger.error(f"检测到远程主机 {host} 已存在MinIO服务！为避免覆盖现有环境，操作已终止。")
-                    exit(1)
+                    # 检查服务是否正在运行
+                    check_cmd = "systemctl status minio"
+                    status_exit_code, status_stdout, status_stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    
+                    if status_exit_code == 0 and "active (running)" in status_stdout:
+                        self.logger.error(f"检测到远程主机 {host} 已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
+                        exit(1)
+                    else:
+                        self.logger.warning(f"检测到远程主机 {host} 存在MinIO服务文件，但服务未运行，可以继续部署。")
         
         elif deployment_mode == "cluster":
             cluster_config = self.config.get("cluster", {})
@@ -438,8 +474,15 @@ class Deployer:
                 exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
                 
                 if exit_code == 0:
-                    self.logger.error(f"检测到集群节点 {host} 已存在MinIO服务！为避免覆盖现有环境，操作已终止。")
-                    exit(1)
+                    # 检查服务是否正在运行
+                    check_cmd = "systemctl status minio"
+                    status_exit_code, status_stdout, status_stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    
+                    if status_exit_code == 0 and "active (running)" in status_stdout:
+                        self.logger.error(f"检测到集群节点 {ssh_params['host']} 已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
+                        exit(1)
+                    else:
+                        self.logger.warning(f"检测到集群节点 {ssh_params['host']} 存在MinIO服务文件，但服务未运行，可以继续部署。")
         
         credentials = self.config.get("credentials", {})
         
@@ -498,7 +541,7 @@ class Deployer:
                         
                         # 格式化磁盘（如果需要）
                         if format_disk:
-                            cmd = f"mkfs.{filesystem} -f {device}"
+                            cmd = f"yes | mkfs.{filesystem} {device}"
                             result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
                             if result[0] != 0:
                                 self.logger.error(f"格式化远程主机 {host} 的磁盘 {device} 失败：{result[2]}")
@@ -644,19 +687,22 @@ class Deployer:
         
         deployment_mode = self.config.get("deployment_mode")
         credentials = self.config.get("credentials", {})
+        cluster_config = self.config.get("cluster", {})
+        # 获取存储桶配置
+        buckets = cluster_config.get("buckets", [])
         
         if deployment_mode == "standalone":
             standalone_config = self.config.get("standalone", {})
-            cluster_config = self.config.get("cluster", {})
             listen_port = cluster_config.get("server_port", 9000)
             console_port = cluster_config.get("console_port", 9001)
             
             if self.dry_run:
                 self.logger.info(f"[DRY RUN] 准备运行健康检查，端口：{listen_port}")
+                self.logger.info(f"[DRY RUN] 将创建以下存储桶：{[bucket['name'] for bucket in buckets]}")
             else:
                 # 运行健康检查
                 results = self.health_checker.run_comprehensive_check(
-                    "localhost", listen_port, console_port, credentials=credentials
+                    "localhost", listen_port, console_port, credentials=credentials, buckets=buckets
                 )
                 
                 if not results["overall_status"]:
@@ -664,7 +710,6 @@ class Deployer:
                     exit(1)
         
         elif deployment_mode == "cluster":
-            cluster_config = self.config.get("cluster", {})
             nodes = cluster_config.get("nodes", [])
             server_port = cluster_config.get("server_port", 9000)
             console_port = cluster_config.get("console_port", 9001)
@@ -676,10 +721,11 @@ class Deployer:
                 
                 if self.dry_run:
                     self.logger.info(f"[DRY RUN] 准备检查节点 {host} 的健康状态")
+                    self.logger.info(f"[DRY RUN] 将在节点 {host} 创建以下存储桶：{[bucket['name'] for bucket in buckets]}")
                     return True
                 else:
                     results = self.health_checker.run_comprehensive_check(
-                        host, server_port, console_port, credentials=credentials
+                        host, server_port, console_port, credentials=credentials, buckets=buckets
                     )
                     return results["overall_status"]
             
@@ -762,12 +808,72 @@ class Deployer:
         else:
             self.logger.info(f"未安装MinIO的节点数：0")
         
-        # 如果有节点已安装MinIO，给出友好提示并退出
+        # 检查已安装MinIO的节点上服务是否可用
+        nodes_with_unavailable_service = []
         if nodes_with_minio:
-            self.logger.error("\n检测到部分或全部节点已安装MinIO服务！")
-            self.logger.error("为避免覆盖现有MinIO环境，部署已终止。")
-            self.logger.error("如需在已安装MinIO的节点上重新部署，请先手动卸载现有MinIO服务。")
-            exit(1)
+            self.logger.info("\n检查已安装MinIO的节点上服务是否可用...")
+            
+            for node in nodes_with_minio:
+                host = node["host"]
+                node_type = node["type"]
+                
+                if node_type == "本地主机":
+                    # 本地主机，直接检查服务状态
+                    status, _ = self.service_manager.check_service_status()
+                    if not status:
+                        self.logger.warning(f"  - {host} ({node_type})：服务存在但不可用")
+                        nodes_with_unavailable_service.append(node)
+                    else:
+                        self.logger.info(f"  - {host} ({node_type})：服务存在且可用")
+                else:
+                    # 远程主机或集群节点，通过SSH检查服务状态
+                    ssh_params = self.get_ssh_params(node if node_type == "集群节点" else None)
+                    check_cmd = "systemctl status minio"
+                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    
+                    if exit_code != 0 or "active (running)" not in stdout:
+                        self.logger.warning(f"  - {host} ({node_type})：服务存在但不可用")
+                        nodes_with_unavailable_service.append(node)
+                    else:
+                        self.logger.info(f"  - {host} ({node_type})：服务存在且可用")
+        
+        # 根据检查结果决定是否继续部署
+        if nodes_with_minio:
+            # 检查是否所有已安装MinIO的节点服务都不可用
+            if len(nodes_with_unavailable_service) == len(nodes_with_minio):
+                self.logger.info("\n所有已安装MinIO的节点服务均不可用，将跳过下载和安装步骤，直接进行配置操作。")
+                self.logger.info("继续部署流程...")
+                self.logger.info("-" * 60)
+                return  # 继续部署流程，跳过安装步骤
+            else:
+                # 有部分或全部节点的MinIO服务可用
+                self.logger.error("\n检测到部分或全部节点已安装并运行MinIO服务！")
+                self.logger.error("为避免覆盖现有MinIO环境，部署将终止。")
+                
+                # 询问用户是否继续
+                if not self.dry_run:
+                    try:
+                        user_input = input("\n是否要手动卸载现有MinIO服务并继续部署？(yes/no): ").strip().lower()
+                        if user_input in ["yes", "y"]:
+                            self.logger.info("用户选择继续部署，将卸载现有MinIO服务")
+                            # 调用remove_service方法卸载MinIO服务
+                            if not self.service_manager.remove_service():
+                                self.logger.error("卸载现有MinIO服务失败，部署将终止")
+                                exit(1)
+                            self.logger.info("继续部署流程...")
+                            self.logger.info("-" * 60)
+                            return  # 继续部署流程
+                        elif user_input in ["no", "n"]:
+                            self.logger.info("用户选择取消部署")
+                            exit(1)
+                        else:
+                            self.logger.info("无效输入，默认选择取消部署")
+                            exit(1)
+                    except KeyboardInterrupt:
+                        self.logger.info("\n用户中断操作")
+                        exit(1)
+                else:
+                    exit(1)
         
         self.logger.info("所有节点均未安装MinIO，继续部署流程")
         self.logger.info("-" * 60)
@@ -799,14 +905,14 @@ class Deployer:
         # 6. 配置防火墙
         self.configure_firewall()
         
-        # # 7. 安装MinIO
-        # self.install_minio()
+        # 7. 安装MinIO
+        self.install_minio()
         
-        # # 8. 配置MinIO服务
-        # self.configure_minio_service()
+        # 8. 配置MinIO服务
+        self.configure_minio_service()
         
-        # # 9. 运行健康检查
-        # self.run_health_checks()
+        # 9. 运行健康检查
+        self.run_health_checks()
         
         self.logger.info("=" * 60)
         self.logger.info("MinIO部署完成")

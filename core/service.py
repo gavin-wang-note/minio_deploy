@@ -34,7 +34,7 @@ class ServiceManager:
                 return False
         
         # 构建服务文件内容
-        service_content = f"""[Unit]
+        service_content = """[Unit]
 Description=MinIO Object Storage Service
 Documentation=https://docs.min.io
 Wants=network-online.target
@@ -51,20 +51,29 @@ EnvironmentFile=-/etc/default/minio
 ExecStartPre=/bin/bash -c "[ -n \"$MINIO_VOLUMES\" ] || echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\""
 
 ExecStart=/usr/local/bin/minio server \
-"
+"""
         
         # 添加纠删码配置（如果有）
-        if erasure_coding is not None and erasure_coding.get("standard"):
-            service_content += f"  --erasure-coding {erasure_coding['standard']} \
+        try:
+            standard = None
+            # 安全获取standard值
+            if erasure_coding is not None:
+                if isinstance(erasure_coding, dict):
+                    standard = erasure_coding.get("standard")
+            
+            if standard:
+                service_content += f"  --erasure-coding {standard} \
 "
+        except Exception as e:
+            self.logger.warning(f"纠删码配置无效，跳过纠删码配置：{e}")
         
         # 添加监听端口和控制台端口
         service_content += f"  --address :{listen_port} \
   --console-address :{console_port} \
 "
         
-        # 添加数据目录
-        service_content += f"  {data_dir}
+        # 添加数据目录和systemd服务的其他部分
+        service_content += f"""  {data_dir}
 
 # Let systemd restart this service always
 Restart=always
@@ -92,10 +101,21 @@ WantedBy=multi-user.target
             env_content += f"MINIO_ROOT_PASSWORD={credentials['root_password']}\n"
         
         env_content += f"MINIO_VOLUMES=\"{data_dir}\"\n"
-        env_content += f"MINIO_OPTS=\"--address :{listen_port} --console-address :{console_port}\"\n"
+        # 不要在环境变量中配置端口，避免与服务文件中的配置冲突
+        env_content += f"MINIO_OPTS=\"\"\n"
         
-        if erasure_coding is not None and erasure_coding.get("standard"):
-            env_content += f"MINIO_OPTS=\"$MINIO_OPTS --erasure-coding {erasure_coding['standard']}\"\n"
+        # 添加纠删码环境变量（如果有）
+        try:
+            standard = None
+            # 安全获取standard值
+            if erasure_coding is not None:
+                if isinstance(erasure_coding, dict):
+                    standard = erasure_coding.get("standard")
+            
+            if standard:
+                env_content += f"MINIO_OPTS=\"$MINIO_OPTS --erasure-coding {standard}\"\n"
+        except Exception as e:
+            self.logger.warning(f"纠删码环境变量配置无效，跳过纠删码环境变量配置：{e}")
         
         try:
             # 写入环境变量文件
@@ -219,9 +239,10 @@ WantedBy=multi-user.target
                 return True
             
             # 尝试通过systemctl检查服务是否存在
+            # 移除check=True，避免因为命令返回非零退出码而抛出异常
             result = subprocess.run(
                 ["systemctl", "list-unit-files", "--type", "service", "|", "grep", "minio"],
-                shell=True, capture_output=True, text=True, check=True
+                shell=True, capture_output=True, text=True, check=False
             )
             
             if self.service_name in result.stdout:
@@ -247,13 +268,14 @@ WantedBy=multi-user.target
         self.logger.info(f"检查MinIO服务状态：{self.service_name}")
         
         try:
+            # 移除check=True，避免因为命令返回非零退出码而抛出异常
             result = subprocess.run(
                 ["systemctl", "status", self.service_name],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=False
             )
-            output = result.stdout
+            output = result.stdout + "\n" + result.stderr
             
-            # 检查服务是否运行
+            # 直接检查输出中是否包含"active (running)"字符串
             if "active (running)" in output:
                 self.logger.info(f"MinIO服务运行正常：{self.service_name}")
                 return (True, output)
@@ -264,6 +286,65 @@ WantedBy=multi-user.target
         except Exception as e:
             self.logger.error(f"检查MinIO服务状态失败：{e}")
             return (False, str(e))
+    
+    def stop_service(self):
+        """
+        停止MinIO服务
+        
+        Returns:
+            bool: True表示停止成功，False表示失败
+        """
+        self.logger.info(f"停止MinIO服务：{self.service_name}")
+        
+        try:
+            subprocess.run(["systemctl", "stop", self.service_name], check=True, capture_output=True, text=True)
+            self.logger.info(f"MinIO服务停止成功：{self.service_name}")
+            return True
+        except Exception as e:
+            self.logger.error(f"MinIO服务停止失败：{e}")
+            return False
+    
+    def remove_service(self):
+        """
+        移除MinIO服务（停止、禁用、删除服务文件）
+        
+        Returns:
+            bool: True表示移除成功，False表示失败
+        """
+        self.logger.info(f"开始移除MinIO服务：{self.service_name}")
+        
+        try:
+            # 1. 停止服务
+            if self.check_service_status()[0]:
+                if not self.stop_service():
+                    return False
+            
+            # 2. 禁用服务
+            if self.enable_service():
+                if not self.disable_service():
+                    return False
+            
+            # 3. 删除服务文件
+            if os.path.exists(self.service_file):
+                os.remove(self.service_file)
+                self.logger.info(f"MinIO服务文件删除成功：{self.service_file}")
+            
+            # 4. 删除环境变量文件
+            env_file = "/etc/default/minio"
+            if os.path.exists(env_file):
+                os.remove(env_file)
+                self.logger.info(f"MinIO环境变量文件删除成功：{env_file}")
+            
+            # 5. 重新加载systemd配置
+            subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True, text=True)
+            self.logger.info("systemd配置重新加载成功")
+            
+            self.logger.info(f"MinIO服务移除成功：{self.service_name}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"MinIO服务移除失败：{e}")
+            return False
     
     def get_service_logs(self, lines=50):
         """
@@ -285,7 +366,7 @@ WantedBy=multi-user.target
             return result.stdout
         except Exception as e:
             self.logger.error(f"获取MinIO服务日志失败：{e}")
-            return f"获取日志失败：{e}"
+            return str(e)
     
     def configure_service(self, data_dir, listen_port=9000, console_port=9001, credentials=None, erasure_coding=None):
         """

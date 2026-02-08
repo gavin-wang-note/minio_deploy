@@ -162,61 +162,149 @@ class DiskManager:
                 self.logger.error(f"设备 {device} 不存在")
                 return False
             
-            # 使用mkfs格式化磁盘，添加-f参数强制格式化
-            cmd = f"mkfs.{filesystem} -f {device}"
-            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            # 检查设备是否已挂载
+            self.logger.debug("检查设备是否已挂载...")
+            with open('/proc/mounts', 'r') as f:
+                mounts_content = f.read()
+                self.logger.debug(f"/proc/mounts 内容：\n{mounts_content}")
+                
+                for line in mounts_content.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    if parts[0] == device:
+                        # 设备已挂载，先卸载
+                        mount_point = parts[1]
+                        self.logger.warning(f"设备 {device} 已挂载到 {mount_point}，需要先卸载")
+                        
+                        # 执行卸载命令
+                        umount_cmd = f"umount {device}"
+                        self.logger.debug(f"执行卸载命令：{umount_cmd}")
+                        umount_result = subprocess.run(umount_cmd, shell=True, check=True, capture_output=True, text=True)
+                        self.logger.debug(f"卸载命令返回码：{umount_result.returncode}")
+                        self.logger.debug(f"卸载命令标准输出：{umount_result.stdout}")
+                        self.logger.debug(f"卸载命令标准错误：{umount_result.stderr}")
+                        self.logger.info(f"设备 {device} 已从 {mount_point} 卸载")
             
-            self.logger.info(f"设备 {device} 格式化成功，输出：{result.stdout}")
+            # 如果是整个磁盘（如 /dev/sdb 而不是 /dev/sdb1），先清除分区表
+            if re.match(r'/dev/[a-zA-Z]+$', device):
+                self.logger.info(f"检测到整个磁盘 {device}，先清除文件系统签名")
+                # 使用wipefs清除文件系统签名
+                cmd = f"wipefs -a {device}"
+                self.logger.debug(f"执行命令：{cmd}")
+                result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+                self.logger.debug(f"命令返回码：{result.returncode}")
+                self.logger.debug(f"命令标准输出：{result.stdout}")
+                self.logger.debug(f"命令标准错误：{result.stderr}")
+                self.logger.info(f"已清除设备 {device} 的文件系统签名")
+                
+            # 使用mkfs格式化磁盘，通过yes命令自动确认已存在的文件系统
+            cmd = f"yes | mkfs.{filesystem} {device}"
+            self.logger.debug(f"执行格式化命令：{cmd}")
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            self.logger.debug(f"格式化命令返回码：{result.returncode}")
+            self.logger.debug(f"格式化命令标准输出：{result.stdout}")
+            self.logger.debug(f"格式化命令标准错误：{result.stderr}")
+            
+            self.logger.info(f"设备 {device} 格式化成功")
             return True
             
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"设备 {device} 格式化失败，错误：{e.stderr}")
+            self.logger.error(f"设备 {device} 格式化失败，命令：{e.cmd}")
+            self.logger.error(f"返回码：{e.returncode}")
+            self.logger.error(f"标准输出：{e.stdout}")
+            self.logger.error(f"标准错误：{e.stderr}")
             return False
         except Exception as e:
             self.logger.error(f"设备 {device} 格式化失败，错误：{e}")
             return False
     
-    def mount_disk(self, device, mount_point):
+    def mount_disk(self, device, mount_point, filesystem='ext4'):
         """
         挂载磁盘
         
         Args:
             device: 设备路径（如 /dev/sdb1）
             mount_point: 挂载点路径（如 /data/minio）
+            filesystem: 文件系统类型，默认为ext4
         
         Returns:
             bool: True表示挂载成功，False表示失败
         """
-        self.logger.info(f"挂载设备 {device} 到 {mount_point}")
+        self.logger.info(f"挂载设备 {device} 到 {mount_point}，文件系统类型：{filesystem}")
         
         try:
             # 检查挂载点是否存在，如果不存在则创建
             if not os.path.exists(mount_point):
                 self.logger.info(f"创建挂载点 {mount_point}")
                 os.makedirs(mount_point, exist_ok=True)
+                self.logger.debug(f"挂载点 {mount_point} 创建成功")
+            else:
+                self.logger.debug(f"挂载点 {mount_point} 已存在")
             
             # 检查是否已挂载
+            self.logger.debug("检查设备是否已挂载...")
             with open('/proc/mounts', 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
+                mounts_content = f.read()
+                self.logger.debug(f"/proc/mounts 内容：\n{mounts_content}")
+                
+                for line in mounts_content.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
                     if len(parts) < 2:
                         continue
                     if parts[0] == device and parts[1] == mount_point:
                         self.logger.info(f"设备 {device} 已挂载到 {mount_point}")
                         return True
             
-            # 执行挂载命令
-            cmd = f"mount {device} {mount_point}"
+            # 执行挂载命令，指定文件系统类型
+            cmd = f"mount -t {filesystem} {device} {mount_point}"
+            self.logger.debug(f"执行挂载命令：{cmd}")
             result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            self.logger.debug(f"挂载命令返回码：{result.returncode}")
+            self.logger.debug(f"挂载命令标准输出：{result.stdout}")
+            self.logger.debug(f"挂载命令标准错误：{result.stderr}")
             
             self.logger.info(f"设备 {device} 挂载成功")
             return True
             
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"设备 {device} 挂载失败，错误：{e.stderr}")
+            self.logger.error(f"设备 {device} 挂载失败")
+            self.logger.error(f"命令：{e.cmd}")
+            self.logger.error(f"返回码：{e.returncode}")
+            self.logger.error(f"标准输出：{e.stdout}")
+            self.logger.error(f"标准错误：{e.stderr}")
+            
+            # 尝试获取更多调试信息
+            try:
+                # 检查设备文件系统
+                blkid_cmd = f"blkid {device}"
+                self.logger.debug(f"执行命令获取设备信息：{blkid_cmd}")
+                blkid_result = subprocess.run(blkid_cmd, shell=True, capture_output=True, text=True)
+                self.logger.debug(f"blkid 命令返回码：{blkid_result.returncode}")
+                self.logger.debug(f"blkid 命令标准输出：{blkid_result.stdout}")
+                self.logger.debug(f"blkid 命令标准错误：{blkid_result.stderr}")
+                
+                # 检查设备大小
+                lsblk_cmd = f"lsblk -o NAME,SIZE,TYPE,MOUNTPOINT {device}"
+                self.logger.debug(f"执行命令获取磁盘信息：{lsblk_cmd}")
+                lsblk_result = subprocess.run(lsblk_cmd, shell=True, capture_output=True, text=True)
+                self.logger.debug(f"lsblk 命令返回码：{lsblk_result.returncode}")
+                self.logger.debug(f"lsblk 命令标准输出：{lsblk_result.stdout}")
+                self.logger.debug(f"lsblk 命令标准错误：{lsblk_result.stderr}")
+            except Exception as debug_e:
+                self.logger.debug(f"获取调试信息失败：{debug_e}")
+                
             return False
         except Exception as e:
             self.logger.error(f"设备 {device} 挂载失败，错误：{e}")
+            import traceback
+            self.logger.error(f"异常堆栈：{traceback.format_exc()}")
             return False
     
     def add_to_fstab(self, device, mount_point, filesystem='ext4', options='defaults'):
@@ -343,35 +431,59 @@ class DiskManager:
             bool: True表示准备成功，False表示失败
         """
         self.logger.info(f"准备磁盘：设备 {device}，挂载点 {mount_point}")
+        self.logger.debug(f"文件系统：{filesystem}，是否格式化：{format_disk}，最小空间：{min_space_gb}GB")
         
         # 检查是否为操作系统分区
+        self.logger.debug("步骤1：检查是否为操作系统分区")
         if not self.check_os_partition(device):
+            self.logger.debug("检查操作系统分区失败")
             return False
+        self.logger.debug("检查操作系统分区通过")
         
         # 检查磁盘是否可用
+        self.logger.debug("步骤2：检查磁盘是否可用")
         if not self.check_disk(device):
+            self.logger.debug("检查磁盘可用状态失败")
             return False
+        self.logger.debug("检查磁盘可用状态通过")
         
         # 格式化磁盘（如果需要）
         if format_disk:
+            self.logger.debug("步骤3：格式化磁盘")
             if not self.format_disk(device, filesystem):
+                self.logger.debug("磁盘格式化失败")
                 return False
+            self.logger.debug("磁盘格式化成功")
+        else:
+            self.logger.debug("步骤3：跳过磁盘格式化（format_disk=False）")
         
         # 挂载磁盘
-        if not self.mount_disk(device, mount_point):
+        self.logger.debug("步骤4：挂载磁盘")
+        if not self.mount_disk(device, mount_point, filesystem):
+            self.logger.debug("磁盘挂载失败")
             return False
+        self.logger.debug("磁盘挂载成功")
         
         # 添加到fstab
+        self.logger.debug("步骤5：添加到fstab")
         if not self.add_to_fstab(device, mount_point, filesystem):
+            self.logger.debug("添加到fstab失败")
             return False
+        self.logger.debug("添加到fstab成功")
         
         # 检查磁盘空间
+        self.logger.debug("步骤6：检查磁盘空间")
         if not self.check_disk_space(mount_point, min_space_gb):
+            self.logger.debug("检查磁盘空间失败")
             return False
+        self.logger.debug("检查磁盘空间成功")
         
         # 设置权限
+        self.logger.debug("步骤7：设置权限")
         if not self.set_permissions(mount_point):
+            self.logger.debug("设置权限失败")
             return False
+        self.logger.debug("设置权限成功")
         
         self.logger.info(f"磁盘 {device} 准备成功，已挂载到 {mount_point}")
         return True

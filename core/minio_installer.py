@@ -8,6 +8,46 @@ class MinioInstaller:
         self.logger = logger or Logger().get_logger()
         self.system_arch = self._get_system_arch()
     
+    def check_minio_installed(self):
+        """
+        检查MinIO是否已安装
+        
+        Returns:
+            bool: True表示已安装，False表示未安装
+        """
+        self.logger.info("检查MinIO是否已安装...")
+        
+        try:
+            result = subprocess.run(
+                ["minio", "--version"],
+                capture_output=True, text=True, check=True
+            )
+            self.logger.info(f"MinIO已安装，版本：{result.stdout.strip()}")
+            return True
+        except Exception as e:
+            self.logger.info("MinIO未安装")
+            return False
+    
+    def check_mc_installed(self):
+        """
+        检查MinIO客户端(mc)是否已安装
+        
+        Returns:
+            bool: True表示已安装，False表示未安装
+        """
+        self.logger.info("检查MinIO客户端(mc)是否已安装...")
+        
+        try:
+            result = subprocess.run(
+                ["mc", "--version"],
+                capture_output=True, text=True, check=True
+            )
+            self.logger.info(f"mc已安装，版本：{result.stdout.strip()}")
+            return True
+        except Exception as e:
+            self.logger.info("mc未安装")
+            return False
+    
     def _get_system_arch(self):
         """
         获取系统架构
@@ -129,8 +169,12 @@ class MinioInstaller:
             install_dir: 安装目录，默认为 /usr/local/bin
         
         Returns:
-            bool: True表示安装成功，False表示失败
+            bool: True表示安装成功或已安装，False表示安装失败
         """
+        # 检查是否已安装MinIO
+        if self.check_minio_installed():
+            return True
+            
         self.logger.info("开始安装MinIO服务器...")
         
         # 创建安装目录
@@ -211,8 +255,12 @@ class MinioInstaller:
             install_dir: 安装目录，默认为 /usr/local/bin
         
         Returns:
-            bool: True表示安装成功，False表示失败
+            bool: True表示安装成功或已安装，False表示失败
         """
+        # 检查是否已安装mc
+        if self.check_mc_installed():
+            return True
+            
         self.logger.info("开始安装MinIO客户端(mc)...")
         
         # 创建安装目录

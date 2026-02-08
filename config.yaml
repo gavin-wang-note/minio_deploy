@@ -38,11 +38,11 @@ standalone:
 
   # 磁盘配置（必选）
   disk:
-    enabled: false              # 是否启用磁盘管理，默认为false
-    device: "/dev/sdb1"         # 磁盘设备路径
-    mount_point: "/data/minio"  # 挂载点
-    filesystem: "ext4"          # 文件系统类型，默认为ext4
-    format_disk: false          # 是否格式化磁盘，默认为false
+    enabled: true                # 是否启用磁盘管理，默认为false
+    device: "/dev/sdb"           # 磁盘设备路径
+    mount_point: "/data/minio"   # 挂载点
+    filesystem: "ext4"           # 文件系统类型，默认为ext4
+    format_disk: true            # 是否格式化磁盘，默认为false
 
 # 集群模式配置
 cluster:
@@ -57,11 +57,11 @@ cluster:
       labels: "disk=ssd,region=north"
       # 磁盘配置（必选）
       disk:
-        enabled: false          # 是否启用磁盘管理，默认为false
-        device: "/dev/sdb1"     # 磁盘设备路径
+        enabled: true               # 是否启用磁盘管理，默认为false
+        device: "/dev/sdb"          # 磁盘设备路径
         mount_point: "/data/minio"  # 挂载点
-        filesystem: "ext4"      # 文件系统类型，默认为ext4
-        format_disk: false      # 是否格式化磁盘，默认为false
+        filesystem: "ext4"          # 文件系统类型，默认为ext4
+        format_disk: true           # 是否格式化磁盘，默认为false
     - host: "node2.example.com"
       ip: "192.168.3.92"
       data_dir: "/data/minio"
@@ -72,11 +72,11 @@ cluster:
       labels: "disk=ssd,region=north"
       # 磁盘配置（必选）
       disk:
-        enabled: false          # 是否启用磁盘管理，默认为false
-        device: "/dev/sdb1"     # 磁盘设备路径
+        enabled: true          # 是否启用磁盘管理，默认为false
+        device: "/dev/sdb"     # 磁盘设备路径
         mount_point: "/data/minio"  # 挂载点
         filesystem: "ext4"      # 文件系统类型，默认为ext4
-        format_disk: false      # 是否格式化磁盘，默认为false
+        format_disk: true      # 是否格式化磁盘，默认为false
     # 更多节点...
 
   server_port: 9000           # 服务端口
