@@ -180,9 +180,9 @@ class DiskManager:
                         mount_point = parts[1]
                         self.logger.warning(f"设备 {device} 已挂载到 {mount_point}，需要先卸载")
                         
-                        # 执行卸载命令
-                        umount_cmd = f"umount {device}"
-                        self.logger.debug(f"执行卸载命令：{umount_cmd}")
+                        # 执行强制卸载命令
+                        umount_cmd = f"umount -lf {device}"
+                        self.logger.debug(f"执行强制卸载命令：{umount_cmd}")
                         umount_result = subprocess.run(umount_cmd, shell=True, check=True, capture_output=True, text=True)
                         self.logger.debug(f"卸载命令返回码：{umount_result.returncode}")
                         self.logger.debug(f"卸载命令标准输出：{umount_result.stdout}")

@@ -4,8 +4,9 @@ import socket
 from core.logger import Logger
 
 class HealthChecker:
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, remote_executor=None):
         self.logger = logger or Logger().get_logger()
+        self.remote_executor = remote_executor
     
     def check_port_listening(self, host, port, timeout=5, retry_count=5, retry_delay=5):
         """
@@ -46,32 +47,115 @@ class HealthChecker:
         self.logger.warning(f"端口 {host}:{port} 未监听（已重试 {retry_count} 次）")
         return False
     
-    def check_service_running(self, service_name="minio"):
+    def check_service_running(self, service_name="minio", host=None, ssh_params=None):
         """
         检查MinIO服务是否运行
         
         Args:
             service_name: 服务名称，默认为minio
+            host: 主机IP或域名（可选）
+            ssh_params: SSH连接参数（可选），包含host, port, username, ssh_key, password
         
         Returns:
             bool: True表示服务正在运行，False表示未运行
         """
-        self.logger.info(f"检查服务 {service_name} 是否运行...")
+        if host:
+            self.logger.info(f"节点 {host} 检查服务 {service_name} 是否运行...")
+        else:
+            self.logger.info(f"检查服务 {service_name} 是否运行...")
         
+        # 首先尝试使用systemd检查服务状态
         try:
-            result = subprocess.run(
-                ["systemctl", "is-active", service_name],
-                capture_output=True, text=True, check=True
-            )
-            status = result.stdout.strip()
-            if status == "active":
-                self.logger.info(f"服务 {service_name} 正在运行")
-                return True
+            # 检查是否为本地节点
+            is_localhost = host in ["localhost", "127.0.0.1", "127.0.1.1"]
+            
+            if (host and not is_localhost and self.remote_executor and ssh_params):
+                # 远程节点：使用remote_executor执行命令
+                cmd = f"systemctl is-active {service_name}"
+                exit_code, stdout, stderr = self.remote_executor.execute_command(
+                    ssh_params["host"], cmd, ssh_params["port"], 
+                    ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"]
+                )
+                status = stdout.strip()
+                if status == "active":
+                    self.logger.info(f"节点 {host} 服务 {service_name} 正在运行")
+                    return True
+                else:
+                    self.logger.warning(f"节点 {host} 服务 {service_name} systemd状态非active：{status}")
+            elif not host or is_localhost:
+                # 本地节点：使用subprocess执行命令
+                result = subprocess.run(
+                    ["systemctl", "is-active", service_name],
+                    capture_output=True, text=True, check=True
+                )
+                status = result.stdout.strip()
+                if status == "active":
+                    if host:
+                        self.logger.info(f"节点 {host} 服务 {service_name} 正在运行")
+                    else:
+                        self.logger.info(f"服务 {service_name} 正在运行")
+                    return True
+                else:
+                    if host:
+                        self.logger.warning(f"节点 {host} 服务 {service_name} systemd状态非active：{status}")
+                    else:
+                        self.logger.warning(f"服务 {service_name} systemd状态非active：{status}")
             else:
-                self.logger.warning(f"服务 {service_name} 未运行，状态：{status}")
+                self.logger.warning(f"节点 {host} 无远程执行器或SSH参数，无法检查systemd服务状态")
+        except Exception as e:
+            if host:
+                self.logger.warning(f"节点 {host} systemd服务检查失败：{e}")
+            else:
+                self.logger.warning(f"systemd服务检查失败：{e}")
+        
+        # 如果systemd检查失败或非active，尝试检测MinIO进程是否在运行
+        try:
+            # 检查是否为本地节点
+            is_localhost = host in ["localhost", "127.0.0.1", "127.0.1.1"]
+            
+            if (host and not is_localhost and self.remote_executor and ssh_params):
+                # 远程节点：使用remote_executor执行命令
+                cmd = "ps aux"
+                exit_code, stdout, stderr = self.remote_executor.execute_command(
+                    ssh_params["host"], cmd, ssh_params["port"], 
+                    ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"]
+                )
+                # 检查输出中是否包含minio进程信息
+                minio_processes = [line for line in stdout.splitlines() if "minio" in line and not "/bin/sh" in line and not "grep" in line]
+                if minio_processes:
+                    self.logger.info(f"节点 {host} 检测到MinIO进程正在运行")
+                    return True
+                else:
+                    self.logger.warning(f"节点 {host} 未检测到MinIO进程")
+                    return False
+            elif not host or is_localhost:
+                # 本地节点：使用subprocess执行命令
+                result = subprocess.run(
+                    ["ps", "aux"],
+                    capture_output=True, text=True, check=True
+                )
+                # 检查输出中是否包含minio进程信息
+                minio_processes = [line for line in result.stdout.splitlines() if "minio" in line and not "/bin/sh" in line and not "grep" in line]
+                if minio_processes:
+                    if host:
+                        self.logger.info(f"节点 {host} 检测到MinIO进程正在运行")
+                    else:
+                        self.logger.info(f"检测到MinIO进程正在运行")
+                    return True
+                else:
+                    if host:
+                        self.logger.warning(f"节点 {host} 未检测到MinIO进程")
+                    else:
+                        self.logger.warning(f"未检测到MinIO进程")
+                    return False
+            else:
+                self.logger.warning(f"节点 {host} 无远程执行器或SSH参数，无法检查进程状态")
                 return False
         except Exception as e:
-            self.logger.error(f"检查服务 {service_name} 状态失败：{e}")
+            if host:
+                self.logger.error(f"节点 {host} 进程检查失败：{e}")
+            else:
+                self.logger.error(f"进程检查失败：{e}")
             return False
     
     def check_health_api(self, host, port=9000, secure=False, credentials=None, timeout=5, retry_count=5, retry_delay=5):
@@ -248,14 +332,22 @@ class HealthChecker:
                 
                 self.logger.info(f"处理存储桶：{bucket_name}")
                 
-                # 创建存储桶
-                self.logger.info(f"创建存储桶：{bucket_name}")
-                cmd = ["mc", "mb", f"{alias_name}/{bucket_name}"]
+                # 检查存储桶是否已存在
+                self.logger.info(f"检查存储桶 {bucket_name} 是否已存在...")
+                cmd = ["mc", "stat", f"{alias_name}/{bucket_name}"]
                 result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.logger.info(f"存储桶 {bucket_name} 创建成功")
+                
+                if result.returncode != 0:
+                    # 存储桶不存在，执行创建
+                    self.logger.info(f"创建存储桶：{bucket_name}")
+                    cmd = ["mc", "mb", f"{alias_name}/{bucket_name}"]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        self.logger.info(f"存储桶 {bucket_name} 创建成功")
+                    else:
+                        self.logger.warning(f"存储桶 {bucket_name} 创建失败：{result.stderr.strip()}")
                 else:
-                    self.logger.warning(f"存储桶 {bucket_name} 可能已存在或创建失败：{result.stderr.strip()}")
+                    self.logger.info(f"存储桶 {bucket_name} 已存在，跳过创建")
                 
                 # 设置存储桶策略
                 self.logger.info(f"设置存储桶 {bucket_name} 的策略为：{policy}")
@@ -311,7 +403,7 @@ class HealthChecker:
             self.logger.error(f"存储桶创建失败：{e}")
             return (False, f"存储桶创建失败：{e}")
     
-    def run_comprehensive_check(self, host, port=9000, console_port=9001, secure=False, credentials=None, buckets=None):
+    def run_comprehensive_check(self, host, port=9000, console_port=9001, secure=False, credentials=None, buckets=None, ssh_params=None):
         """
         运行综合健康检查
         
@@ -322,11 +414,12 @@ class HealthChecker:
             secure: 是否使用HTTPS，默认为False
             credentials: 认证信息，包含root_user和root_password
             buckets: 存储桶配置列表（可选）
+            ssh_params: SSH连接参数（可选），包含host, port, username, ssh_key, password
         
         Returns:
             dict: 健康检查结果，包含各个检查项的状态和详细信息
         """
-        self.logger.info("开始运行综合健康检查...")
+        self.logger.info(f"节点 {host}:{port} 开始运行综合健康检查...")
         
         results = {
             "service_running": False,
@@ -345,8 +438,8 @@ class HealthChecker:
         }
         
         # 1. 检查服务是否运行
-        results["service_running"] = self.check_service_running()
-        results["service_running_detail"] = "服务正在运行" if results["service_running"] else "服务未运行"
+        results["service_running"] = self.check_service_running(host=host, ssh_params=ssh_params)
+        results["service_running_detail"] = f"节点 {host} 服务正在运行" if results["service_running"] else f"节点 {host} 服务未运行"
         
         # 2. 检查服务端口是否监听
         results["port_listening"] = self.check_port_listening(host, port)
@@ -381,17 +474,17 @@ class HealthChecker:
             results["health_api"]
         )
         
-        self.logger.info(f"综合健康检查完成，总体状态：{'正常' if results['overall_status'] else '异常'}")
+        self.logger.info(f"节点 {host}:{port} 综合健康检查完成，总体状态：{'正常' if results['overall_status'] else '异常'}")
         
         # 打印详细检查结果
-        self.logger.info("详细健康检查结果：")
+        self.logger.info(f"节点 {host}:{port} 详细健康检查结果：")
         for key, value in results.items():
             if "detail" not in key:
                 self.logger.info(f"  {key}: {'✓' if value else '✗'} {results.get(f'{key}_detail', '')}")
-        
+
         # 8. 如果健康检查通过且有存储桶配置，则创建实际存储桶
         if results["overall_status"] and buckets:
-            self.logger.info("\n开始创建配置的实际存储桶...")
+            self.logger.info("开始创建配置的实际存储桶...")
             bucket_create_status, bucket_create_message = self.create_buckets(host, port, secure, credentials, buckets)
             if bucket_create_status:
                 self.logger.info(f"存储桶创建结果：{bucket_create_message}")

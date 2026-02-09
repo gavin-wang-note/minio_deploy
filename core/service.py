@@ -55,15 +55,17 @@ ExecStart=/usr/local/bin/minio server \
         
         # 添加纠删码配置（如果有）
         try:
-            standard = None
+            # 注意：根据参考链接，纠删码参数（--ec）不在服务器启动时配置，而是在创建存储桶时使用
+            # 移除以下配置，避免启动失败
+            # standard = None
             # 安全获取standard值
-            if erasure_coding is not None:
-                if isinstance(erasure_coding, dict):
-                    standard = erasure_coding.get("standard")
-            
-            if standard:
-                service_content += f"  --erasure-coding {standard} \
-"
+            # if erasure_coding is not None:
+            #     if isinstance(erasure_coding, dict):
+            #         standard = erasure_coding.get("standard")
+            # 
+            # if standard:
+            #     service_content += f"  --ec {standard} \
+            self.logger.debug("纠删码参数（--ec）不在服务器启动时配置，而是在创建存储桶时使用，跳过配置")
         except Exception as e:
             self.logger.warning(f"纠删码配置无效，跳过纠删码配置：{e}")
         
@@ -106,14 +108,17 @@ WantedBy=multi-user.target
         
         # 添加纠删码环境变量（如果有）
         try:
-            standard = None
+            # 注意：根据参考链接，纠删码参数（--ec）不在服务器启动时配置，而是在创建存储桶时使用
+            # 移除以下配置，避免启动失败
+            # standard = None
             # 安全获取standard值
-            if erasure_coding is not None:
-                if isinstance(erasure_coding, dict):
-                    standard = erasure_coding.get("standard")
-            
-            if standard:
-                env_content += f"MINIO_OPTS=\"$MINIO_OPTS --erasure-coding {standard}\"\n"
+            # if erasure_coding is not None:
+            #     if isinstance(erasure_coding, dict):
+            #         standard = erasure_coding.get("standard")
+            # 
+            # if standard:
+            #     env_content += f"MINIO_OPTS=\"$MINIO_OPTS --ec {standard}\"\n"
+            self.logger.debug("纠删码参数（--ec）不在服务器启动时配置，而是在创建存储桶时使用，跳过环境变量配置")
         except Exception as e:
             self.logger.warning(f"纠删码环境变量配置无效，跳过纠删码环境变量配置：{e}")
         

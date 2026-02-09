@@ -1,5 +1,7 @@
 import os
 import subprocess
+import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from core.logger import Logger
 from core.system_check import SystemCheck
@@ -24,7 +26,7 @@ class Deployer:
         self.firewall_manager = FirewallManager(logger=self.logger)
         self.minio_installer = MinioInstaller(logger=self.logger)
         self.service_manager = ServiceManager(logger=self.logger)
-        self.health_checker = HealthChecker(logger=self.logger)
+        self.health_checker = HealthChecker(logger=self.logger, remote_executor=self.remote_executor)
         self.config = None
     
     def run_system_checks(self):
@@ -100,6 +102,81 @@ class Deployer:
             "password": password
         }
     
+    def check_node_time_sync(self):
+        """
+        检查集群中所有节点的时间是否同步
+        仅在集群模式下运行，如果节点时间差异过大，将退出部署
+        """
+        deployment_mode = self.config.get("deployment_mode")
+        
+        if deployment_mode != "cluster":
+            return
+        
+        self.logger.info("## 检查节点间时间同步")
+        
+        cluster_config = self.config.get("cluster", {})
+        nodes = cluster_config.get("nodes", [])
+        
+        if len(nodes) < 2:
+            self.logger.info("集群节点数量不足2个，跳过时间同步检查")
+            return
+        
+        # 获取所有节点的时间
+        node_times = []
+        max_time_diff = 0
+        
+        for node in nodes:
+            node_host = node.get("ip", node.get("host"))
+            ssh_params = self.get_ssh_params(node)
+            
+            self.logger.info(f"获取节点 {node_host} 的当前时间")
+            
+            if self.dry_run:
+                self.logger.info(f"[DRY RUN] 准备获取节点 {node_host} 的当前时间")
+                # 使用当前时间作为模拟时间
+                node_time = time.time()
+            else:
+                # 获取节点的Unix时间戳
+                cmd = "date +%s"
+                exit_code, stdout, stderr = self.remote_executor.execute_command(
+                    ssh_params["host"], cmd, ssh_params["port"], 
+                    ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"]
+                )
+                
+                if exit_code != 0:
+                    self.logger.error(f"获取节点 {node_host} 的当前时间失败：{stderr}")
+                    exit(1)
+                
+                try:
+                    node_time = int(stdout.strip())
+                except ValueError:
+                    self.logger.error(f"节点 {node_host} 返回的时间格式无效：{stdout}")
+                    exit(1)
+            
+            node_times.append((node_host, node_time))
+            self.logger.info(f"节点 {node_host} 的当前时间：{node_time} ({datetime.fromtimestamp(node_time)})")
+        
+        # 计算最大时间差异
+        for i in range(len(node_times)):
+            for j in range(i + 1, len(node_times)):
+                host1, time1 = node_times[i]
+                host2, time2 = node_times[j]
+                
+                time_diff = abs(time1 - time2)
+                if time_diff > max_time_diff:
+                    max_time_diff = time_diff
+                    max_diff_hosts = (host1, host2)
+        
+        # 检查时间差异是否超过允许范围（10秒）
+        allowed_diff = 10  # 允许的最大时间差异（秒）
+        if max_time_diff > allowed_diff:
+            host1, host2 = max_diff_hosts
+            self.logger.error(f"节点时间差异过大：{host1} 和 {host2} 之间的时间差异为 {max_time_diff} 秒，超过允许的 {allowed_diff} 秒")
+            self.logger.error("请确保所有节点的系统时间保持同步，建议配置NTP服务")
+            exit(1)
+        
+        self.logger.info(f"所有节点的时间同步正常，最大差异为 {max_time_diff} 秒，小于允许的 {allowed_diff} 秒")
+    
     def check_os_partitions(self):
         """
         检查所有指定的磁盘是否为操作系统分区
@@ -141,11 +218,22 @@ class Deployer:
                                 exit(1)
                             
                             # 检查是否为操作系统分区
-                            cmd = f"df -h | grep -E '{device}' | grep -E '/$' || echo 'not os partition'"
+                            # 先获取所有挂载的系统分区（/、/boot、/boot/efi）
+                            cmd = f"grep -E '^/dev/' /proc/mounts | grep -E ' (/|/boot|/boot/efi)$'"
                             result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                            if result[0] != 0 or "not os partition" in result[1]:
-                                self.logger.error("操作系统分区检测失败，退出部署")
+                            
+                            # 检查当前设备是否在系统分区列表中
+                            is_os_partition = False
+                            if result[0] == 0:
+                                for line in result[1].strip().split('\n'):
+                                    if line.startswith(f"{device}"):
+                                        is_os_partition = True
+                                        break
+                            
+                            if is_os_partition:
+                                self.logger.error(f"检测到设备 {device} 是操作系统分区，不能用于MinIO存储")
                                 exit(1)
+                            self.logger.info(f"设备 {device} 不是操作系统分区，可以安全使用")
         
         elif deployment_mode == "cluster":
             cluster_config = self.config.get("cluster", {})
@@ -174,9 +262,19 @@ class Deployer:
                         self.logger.info(f"节点 {node.get('host')} 的设备 {device} 存在")
                         
                         # 在远程节点上检查是否为操作系统分区
-                        check_os_cmd = f"grep -E '^({device}|/dev/sda|/dev/vda)' /proc/mounts | grep -E '(/|/boot|/boot/efi)'"
+                        # 先获取所有挂载的系统分区（/、/boot、/boot/efi）
+                        check_os_cmd = f"grep -E '^/dev/' /proc/mounts | grep -E ' (/|/boot|/boot/efi)$'"
                         exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_os_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        
+                        # 检查当前设备是否在系统分区列表中
+                        is_os_partition = False
                         if exit_code == 0:
+                            for line in stdout.strip().split('\n'):
+                                if line.startswith(f"{device}"):
+                                    is_os_partition = True
+                                    break
+                        
+                        if is_os_partition:
                             self.logger.error(f"节点 {node.get('host')} 检测到设备 {device} 是操作系统分区，不能用于MinIO存储")
                             exit(1)
                         self.logger.info(f"节点 {node.get('host')} 的设备 {device} 不是操作系统分区，可以安全使用")
@@ -426,64 +524,11 @@ class Deployer:
         self.logger.info("配置MinIO服务")
         self.logger.info("=" * 60)
         
-        # 再次检查MinIO服务是否存在，确保在格式化磁盘前进行检查
+        # 注：MinIO服务存在性检查已在check_minio_exists方法中完成
+        # 如果用户选择继续部署，所有节点的服务都会被卸载
+        # 因此这里不再重复检查，直接进行配置操作
+        
         deployment_mode = self.config.get("deployment_mode")
-        
-        if deployment_mode == "standalone":
-            standalone_config = self.config.get("standalone", {})
-            host = standalone_config.get("host", "localhost")
-            
-            if host in ["localhost", "127.0.0.1", "127.0.1.1"]:
-                # 本地主机，直接检查
-                if self.service_manager.check_service_exists():
-                    # 检查服务是否正在运行
-                    status, _ = self.service_manager.check_service_status()
-                    if status:
-                        self.logger.error("检测到本地已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
-                        exit(1)
-                    else:
-                        self.logger.warning("检测到本地存在MinIO服务文件，但服务未运行，可以继续部署。")
-            else:
-                # 远程主机，通过SSH检查
-                ssh_params = self.get_ssh_params()
-                
-                # 构造检查命令
-                check_cmd = "systemctl list-unit-files --type service | grep -q minio || [ -f /etc/systemd/system/minio.service ]"
-                exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                
-                if exit_code == 0:
-                    # 检查服务是否正在运行
-                    check_cmd = "systemctl status minio"
-                    status_exit_code, status_stdout, status_stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                    
-                    if status_exit_code == 0 and "active (running)" in status_stdout:
-                        self.logger.error(f"检测到远程主机 {host} 已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
-                        exit(1)
-                    else:
-                        self.logger.warning(f"检测到远程主机 {host} 存在MinIO服务文件，但服务未运行，可以继续部署。")
-        
-        elif deployment_mode == "cluster":
-            cluster_config = self.config.get("cluster", {})
-            nodes = cluster_config.get("nodes", [])
-            
-            for node in nodes:
-                ssh_params = self.get_ssh_params(node)
-                
-                # 构造检查命令
-                check_cmd = "systemctl list-unit-files --type service | grep -q minio || [ -f /etc/systemd/system/minio.service ]"
-                exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                
-                if exit_code == 0:
-                    # 检查服务是否正在运行
-                    check_cmd = "systemctl status minio"
-                    status_exit_code, status_stdout, status_stderr = self.remote_executor.execute_command(ssh_params["host"], check_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
-                    
-                    if status_exit_code == 0 and "active (running)" in status_stdout:
-                        self.logger.error(f"检测到集群节点 {ssh_params['host']} 已存在并正在运行MinIO服务！为避免覆盖现有环境，操作已终止。")
-                        exit(1)
-                    else:
-                        self.logger.warning(f"检测到集群节点 {ssh_params['host']} 存在MinIO服务文件，但服务未运行，可以继续部署。")
-        
         credentials = self.config.get("credentials", {})
         
         if deployment_mode == "standalone":
@@ -541,6 +586,19 @@ class Deployer:
                         
                         # 格式化磁盘（如果需要）
                         if format_disk:
+                            # 先检查磁盘是否已挂载，如果已挂载则强制卸载
+                            check_mount_cmd = f"grep '^{device} ' /proc/mounts"
+                            result = self.remote_executor.execute_command(ssh_params["host"], check_mount_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                            if result[0] == 0:
+                                # 设备已挂载，先强制卸载
+                                umount_cmd = f"umount -lf {device}"
+                                result = self.remote_executor.execute_command(ssh_params["host"], umount_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                if result[0] != 0:
+                                    self.logger.error(f"强制卸载远程主机 {host} 的磁盘 {device} 失败：{result[2]}")
+                                    exit(1)
+                                self.logger.warning(f"远程主机 {host} 的磁盘 {device} 已强制卸载")
+                            
+                            # 执行格式化命令
                             cmd = f"yes | mkfs.{filesystem} {device}"
                             result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
                             if result[0] != 0:
@@ -594,7 +652,7 @@ class Deployer:
                     service_content += f"Group=root\n"
                     service_content += f"\n"
                     service_content += f"EnvironmentFile=-/etc/default/minio\n"
-                    service_content += f"ExecStartPre=/bin/bash -c '[ -n \"$MINIO_VOLUMES\" ] || echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\"'\n"
+                    service_content += 'ExecStartPre=/bin/bash -c "[ -n \"$MINIO_VOLUMES\" ] || echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\""\n'
                     service_content += f"\n"
                     service_content += f"ExecStart=/usr/local/bin/minio server \\n"
                     service_content += f"  --address :{listen_port} \\n"
@@ -668,10 +726,202 @@ class Deployer:
             server_port = cluster_config.get("server_port", 9000)
             console_port = cluster_config.get("console_port", 9001)
             erasure_coding = cluster_config.get("erasure_coding")
+            credentials = self.config.get("credentials", {})
             
-            # 集群模式下的服务配置比较复杂，需要生成集群启动命令
-            # 这里简化处理，实际需要更复杂的逻辑
-            self.logger.info("集群模式下的服务配置需要手动完成，请参考MinIO官方文档")
+            # 生成集群启动命令
+            cluster_volumes = []
+            for node in nodes:
+                node_host = node.get("ip", node.get("host"))
+                node_disks = node.get("disks", [])
+                if node_disks:
+                    for disk in node_disks:
+                        cluster_volumes.append(f"http://{node_host}:{server_port}{disk['path']}")
+                else:
+                    # 如果没有指定磁盘路径，使用默认路径
+                    cluster_volumes.append(f"http://{node_host}:{server_port}/data/minio")
+            
+            # 构建集群启动命令
+            cluster_command = " ".join(cluster_volumes)
+            
+            # 为每个节点配置服务
+            for node in nodes:
+                node_host = node.get("ip", node.get("host"))
+                ssh_params = self.get_ssh_params(node)
+                
+                self.logger.info(f"配置集群节点 {node_host} 的MinIO服务")
+                
+                if self.dry_run:
+                    self.logger.info(f"[DRY RUN] 准备为节点 {node_host} 创建MinIO服务文件")
+                    self.logger.info(f"[DRY RUN] 集群启动命令：minio server --address :{server_port} --console-address :{console_port} {cluster_command}")
+                else:
+                    # 检查节点是否有磁盘配置
+                    disk_config = node.get("disk", {})
+                    if disk_config.get("enabled", False):
+                        # 启用了磁盘管理，执行格式化和挂载操作
+                        device = disk_config.get("device")
+                        mount_point = disk_config.get("mount_point", "/data/minio")
+                        filesystem = disk_config.get("filesystem", "ext4")
+                        format_disk = disk_config.get("format_disk", False)
+                        
+                        self.logger.info(f"节点 {node_host} 开始配置磁盘：{device}")
+                        
+                        # 格式化磁盘（如果需要）
+                        if format_disk:
+                            # 先检查磁盘是否已挂载，如果已挂载则强制卸载
+                            check_mount_cmd = f"grep '^{device} ' /proc/mounts"
+                            result = self.remote_executor.execute_command(ssh_params["host"], check_mount_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                            if result[0] == 0:
+                                # 设备已挂载，先强制卸载
+                                umount_cmd = f"umount -lf {device}"
+                                result = self.remote_executor.execute_command(ssh_params["host"], umount_cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                if result[0] != 0:
+                                    self.logger.error(f"节点 {node_host} 强制卸载磁盘 {device} 失败：{result[2]}")
+                                    exit(1)
+                                self.logger.warning(f"节点 {node_host} 的磁盘 {device} 已强制卸载")
+                            
+                            # 执行格式化命令
+                            cmd = f"yes | mkfs.{filesystem} {device}"
+                            result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                            if result[0] != 0:
+                                self.logger.error(f"节点 {node_host} 格式化磁盘 {device} 失败：{result[2]}")
+                                exit(1)
+                            self.logger.info(f"节点 {node_host} 磁盘 {device} 格式化成功")
+                        
+                        # 创建挂载点
+                        cmd = f"mkdir -p {mount_point}"
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        if result[0] != 0:
+                            self.logger.error(f"节点 {node_host} 创建挂载点 {mount_point} 失败：{result[2]}")
+                            exit(1)
+                        
+                        # 挂载磁盘
+                        cmd = f"mount {device} {mount_point}"
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        if result[0] != 0:
+                            self.logger.error(f"节点 {node_host} 挂载磁盘 {device} 到 {mount_point} 失败：{result[2]}")
+                            exit(1)
+                        self.logger.info(f"节点 {node_host} 磁盘 {device} 挂载到 {mount_point} 成功")
+                    
+                    # 为每个节点创建数据目录
+                    data_dirs = []
+                    node_disks = node.get("disks", [])
+                    if node_disks:
+                        for disk in node_disks:
+                            data_dir = disk["path"]
+                            data_dirs.append(data_dir)
+                            # 创建数据目录
+                            cmd = f"mkdir -p {data_dir}"
+                            result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                            if result[0] != 0:
+                                self.logger.error(f"在节点 {node_host} 上创建数据目录 {data_dir} 失败：{result[2]}")
+                                exit(1)
+                    else:
+                        # 使用默认数据目录
+                        data_dir = "/data/minio"
+                        data_dirs.append(data_dir)
+                        cmd = f"mkdir -p {data_dir}"
+                        result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                        if result[0] != 0:
+                            self.logger.error(f"在节点 {node_host} 上创建默认数据目录 {data_dir} 失败：{result[2]}")
+                            exit(1)
+                    
+                    self.logger.info(f"节点 {node_host} 数据目录创建成功")
+                    
+                    # 创建服务文件
+                    service_content = f"[Unit]\n"
+                    service_content += f"Description=MinIO\n"
+                    service_content += f"Documentation=https://docs.min.io\n"
+                    service_content += f"Wants=network-online.target\n"
+                    service_content += f"After=network-online.target\n"
+                    service_content += f"AssertFileIsExecutable=/usr/local/bin/minio\n"
+                    service_content += f"\n"
+                    service_content += f"[Service]\n"
+                    service_content += f"WorkingDirectory=/usr/local/bin\n"
+                    service_content += f"\n"
+                    service_content += f"User=root\n"
+                    service_content += f"Group=root\n"
+                    service_content += f"\n"
+                    service_content += f"EnvironmentFile=-/etc/default/minio\n"
+                    service_content += f"ExecStartPre=/bin/bash -c '[ -n \"$MINIO_VOLUMES\" ] || echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\"'\n"
+                    service_content += f"\n"
+                    service_content += f"ExecStart=/usr/local/bin/minio server \\n"
+                    
+                    # 注意：纠删码参数（--ec）不在服务器启动时配置，而是在创建存储桶时使用
+                    # 根据参考链接，服务器启动阶段不需要纠删码参数
+                    # 移除以下配置，避免启动失败
+                    # if erasure_coding:
+                    #     standard = erasure_coding.get("standard")
+                    #     if standard:
+                    #         service_content += f"  --ec {standard} \\n"
+                    
+                    # 添加地址配置
+                    service_content += f"  --address :{server_port} \\n"
+                    service_content += f"  --console-address :{console_port} \\n"
+                    
+                    # 添加集群命令
+                    service_content += f"  {cluster_command}\n"
+                    
+                    service_content += f"\n"
+                    service_content += f"# Let systemd restart this service always\n"
+                    service_content += f"Restart=always\n"
+                    service_content += f"\n"
+                    service_content += f"# Specifies the maximum file descriptor number that can be opened by this process\n"
+                    service_content += f"LimitNOFILE=65536\n"
+                    service_content += f"\n"
+                    service_content += f"# Specifies the maximum number of processes that can be created by this process\n"
+                    service_content += f"LimitNPROC=16384\n"
+                    service_content += f"\n"
+                    service_content += f"# Time to wait before forcefully killing the process\n"
+                    service_content += f"TimeoutStopSec=5\n"
+                    service_content += f"SendSIGKILL=no\n"
+                    service_content += f"\n"
+                    service_content += f"[Install]\n"
+                    service_content += f"WantedBy=multi-user.target\n"
+                    
+                    # 创建环境变量文件
+                    env_content = f"# MinIO environment variables\n"
+                    env_content += f"MINIO_ROOT_USER={credentials.get('root_user', 'minioadmin')}\n"
+                    env_content += f"MINIO_ROOT_PASSWORD={credentials.get('root_password', 'minioadmin123')}\n"
+                    env_content += f"MINIO_VOLUMES=\"{cluster_command}\"\n"
+                    env_content += f"MINIO_OPTS=\"--address :{server_port} --console-address :{console_port}\"\n"
+                    
+                    # 上传服务文件
+                    service_file_path = f"/tmp/minio_{node_host.replace('.', '_')}.service"
+                    with open(service_file_path, 'w') as f:
+                        f.write(service_content)
+                    
+                    # 通过SCP上传服务文件
+                    scp_command = f"scp -P {ssh_params['port']} {service_file_path} {ssh_params['username']}@{ssh_params['host']}:/etc/systemd/system/minio.service"
+                    result = subprocess.run(scp_command, shell=True, check=False, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        self.logger.error(f"上传服务文件到节点 {node_host} 失败：{result.stderr}")
+                        exit(1)
+                    
+                    # 删除临时文件
+                    os.remove(service_file_path)
+                    
+                    # 上传环境变量文件
+                    env_file_path = f"/tmp/minio_{node_host.replace('.', '_')}.env"
+                    with open(env_file_path, 'w') as f:
+                        f.write(env_content)
+                    
+                    scp_command = f"scp -P {ssh_params['port']} {env_file_path} {ssh_params['username']}@{ssh_params['host']}:/etc/default/minio"
+                    result = subprocess.run(scp_command, shell=True, check=False, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        self.logger.error(f"上传环境变量文件到节点 {node_host} 失败：{result.stderr}")
+                        exit(1)
+                    
+                    # 删除临时文件
+                    os.remove(env_file_path)
+                    
+                    # 重新加载systemd配置并启动服务
+                    cmd = f"systemctl daemon-reload && systemctl enable minio && systemctl start minio"
+                    result = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                    if result[0] != 0:
+                        self.logger.error(f"在节点 {node_host} 上配置MinIO服务失败：{result[2]}")
+                        exit(1)
+                    
+                    self.logger.info(f"节点 {node_host} 的MinIO服务配置成功")
         
         self.logger.info("=" * 60)
         self.logger.info("MinIO服务配置完成")
@@ -714,18 +964,20 @@ class Deployer:
             server_port = cluster_config.get("server_port", 9000)
             console_port = cluster_config.get("console_port", 9001)
             
-            # 并行运行健康检查
+            # 并行运行健康检查（不包含存储桶创建）
             def check_node_health(node):
                 host = node.get("ip", node.get("host"))
                 self.logger.info(f"开始检查节点 {host} 的健康状态")
                 
                 if self.dry_run:
                     self.logger.info(f"[DRY RUN] 准备检查节点 {host} 的健康状态")
-                    self.logger.info(f"[DRY RUN] 将在节点 {host} 创建以下存储桶：{[bucket['name'] for bucket in buckets]}")
                     return True
                 else:
+                    # 获取节点的SSH参数
+                    ssh_params = self.get_ssh_params(node)
+                    # 健康检查不传递buckets参数，避免创建存储桶
                     results = self.health_checker.run_comprehensive_check(
-                        host, server_port, console_port, credentials=credentials, buckets=buckets
+                        host, server_port, console_port, credentials=credentials, ssh_params=ssh_params
                     )
                     return results["overall_status"]
             
@@ -735,6 +987,21 @@ class Deployer:
             if not all(results):
                 self.logger.error("某些节点的健康检查失败")
                 exit(1)
+            
+            # 所有节点健康检查通过后，在第一个节点创建存储桶
+            if buckets and not self.dry_run:
+                self.logger.info("\n所有节点健康检查通过，开始创建存储桶...")
+                first_node = nodes[0]
+                host = first_node.get("ip", first_node.get("host"))
+                ssh_params = self.get_ssh_params(first_node)
+                # 使用健康检查器的create_buckets方法创建存储桶
+                bucket_create_status, bucket_create_message = self.health_checker.create_buckets(
+                    host, server_port, False, credentials, buckets
+                )
+                if bucket_create_status:
+                    self.logger.info(f"存储桶创建结果：{bucket_create_message}")
+                else:
+                    self.logger.warning(f"存储桶创建过程中出现问题：{bucket_create_message}")
         
         self.logger.info("=" * 60)
         self.logger.info("健康检查完成")
@@ -841,13 +1108,13 @@ class Deployer:
         if nodes_with_minio:
             # 检查是否所有已安装MinIO的节点服务都不可用
             if len(nodes_with_unavailable_service) == len(nodes_with_minio):
-                self.logger.info("\n所有已安装MinIO的节点服务均不可用，将跳过下载和安装步骤，直接进行配置操作。")
+                self.logger.info("所有已安装MinIO的节点服务均不可用，将跳过下载和安装步骤，直接进行配置操作。")
                 self.logger.info("继续部署流程...")
                 self.logger.info("-" * 60)
                 return  # 继续部署流程，跳过安装步骤
             else:
                 # 有部分或全部节点的MinIO服务可用
-                self.logger.error("\n检测到部分或全部节点已安装并运行MinIO服务！")
+                self.logger.error("检测到部分或全部节点已安装并运行MinIO服务！")
                 self.logger.error("为避免覆盖现有MinIO环境，部署将终止。")
                 
                 # 询问用户是否继续
@@ -856,10 +1123,50 @@ class Deployer:
                         user_input = input("\n是否要手动卸载现有MinIO服务并继续部署？(yes/no): ").strip().lower()
                         if user_input in ["yes", "y"]:
                             self.logger.info("用户选择继续部署，将卸载现有MinIO服务")
-                            # 调用remove_service方法卸载MinIO服务
-                            if not self.service_manager.remove_service():
-                                self.logger.error("卸载现有MinIO服务失败，部署将终止")
-                                exit(1)
+                            
+                            # 对所有已安装MinIO的节点执行卸载操作
+                            for node in nodes_with_minio:
+                                node_host = node["host"]
+                                node_type = node["type"]
+                                
+                                if node_type == "本地主机":
+                                    # 本地主机：使用ServiceManager.remove_service()
+                                    if not self.service_manager.remove_service():
+                                        self.logger.error(f"卸载本地节点MinIO服务失败，部署将终止")
+                                        exit(1)
+                                else:
+                                    # 远程主机或集群节点：通过SSH执行卸载操作
+                                    self.logger.info(f"开始卸载节点 {node_host} 上的MinIO服务...")
+                                    ssh_params = self.get_ssh_params(node if node_type == "集群节点" else None)
+                                    
+                                    # 1. 停止服务
+                                    self.logger.info(f"停止节点 {node_host} 上的MinIO服务")
+                                    cmd = "systemctl stop minio"
+                                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                    
+                                    # 2. 禁用服务
+                                    self.logger.info(f"禁用节点 {node_host} 上的MinIO服务")
+                                    cmd = "systemctl disable minio"
+                                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                    
+                                    # 3. 删除服务文件
+                                    self.logger.info(f"删除节点 {node_host} 上的MinIO服务文件")
+                                    cmd = "rm -f /etc/systemd/system/minio.service"
+                                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                    
+                                    # 4. 删除环境变量文件
+                                    self.logger.info(f"删除节点 {node_host} 上的MinIO环境变量文件")
+                                    cmd = "rm -f /etc/default/minio"
+                                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                    
+                                    # 5. 重新加载systemd配置
+                                    self.logger.info(f"重新加载节点 {node_host} 上的systemd配置")
+                                    cmd = "systemctl daemon-reload"
+                                    exit_code, stdout, stderr = self.remote_executor.execute_command(ssh_params["host"], cmd, ssh_params["port"], ssh_params["username"], ssh_params["ssh_key"], ssh_params["password"])
+                                    
+                                    self.logger.info(f"节点 {node_host} 上的MinIO服务卸载完成")
+                            
+                            self.logger.info("所有节点的MinIO服务卸载完成")
                             self.logger.info("继续部署流程...")
                             self.logger.info("-" * 60)
                             return  # 继续部署流程
@@ -899,7 +1206,10 @@ class Deployer:
         # 4. 检查操作系统分区
         self.check_os_partitions()
         
-        # 5. 检查MinIO服务是否存在
+        # 5. 检查节点间时间同步（仅集群模式）
+        self.check_node_time_sync()
+        
+        # 6. 检查MinIO服务是否存在
         self.check_minio_exists()
         
         # 6. 配置防火墙

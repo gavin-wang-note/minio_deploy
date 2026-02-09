@@ -139,7 +139,8 @@ class RemoteExecutor:
                         except paramiko.ssh_exception.AuthenticationException as e:
                             self.logger.debug(f"使用指定私钥认证失败：{e}")
                         except Exception as e:
-                            self.logger.debug(f"使用指定私钥连接失败：{e}")
+                            # 只记录异常消息，不记录完整堆栈跟踪
+                            self.logger.debug(f"使用指定私钥连接失败：{str(e)}")
                 
                 # 尝试使用默认密钥文件连接
                 self.logger.debug(f"尝试使用默认密钥文件连接")
@@ -164,7 +165,8 @@ class RemoteExecutor:
                 except paramiko.ssh_exception.AuthenticationException as e:
                     self.logger.debug(f"使用默认密钥认证失败：{e}")
                 except Exception as e:
-                    self.logger.debug(f"使用默认密钥连接失败：{e}")
+                    # 只记录异常消息，不记录完整堆栈跟踪
+                    self.logger.debug(f"使用默认密钥连接失败：{str(e)}")
             
             # 2. 如果有公钥内容和密码，检查公钥是否已经在服务器上
             if public_key_content and password:
